@@ -1,0 +1,16 @@
+{
+  "name": "Póker Tournament Tracker",
+  "short_name": "Póker Tracker",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "icons": [
+    {
+      "src": "ptracker-icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

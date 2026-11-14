@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="hu"><head>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.13/html-to-image.min.js" integrity="sha512-iZ2ORl595Wx6miw+GuadDet4WQbdSWS3JLMoNfY8cRGoEFy6oT3G9IbcrBeL6AfkgpA51ETt/faX6yLV+/gFJg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script>
+      (function() {
+        const originalConsole = window.console;
+        window.console = {
+          log: (...args) => { originalConsole.log(...args); window.parent.postMessage({ type: 'console', message: args.join(' ') }, '*'); },
+          error: (...args) => { originalConsole.error(...args); window.parent.postMessage({ type: 'console', message: 'Error: ' + args.join(' ') }, '*'); },
+          warn: (...args) => { originalConsole.warn(...args); window.parent.postMessage({ type: 'console', message: 'Warning: ' + args.join(' ') }, '*'); }
+        };
+        let requestId = 0;
+        let callbacksMap = new Map();
+        let streamControllers = new Map();
+        window.claude = { complete: (prompt) => new Promise((resolve, reject) => { const id = requestId++; callbacksMap.set(id, { resolve, reject }); window.parent.postMessage({ type: 'claudeComplete', id, prompt }, '*'); }) };
+        window.storage = {
+          get: (key, shared = false) => new Promise((resolve, reject) => { const id = requestId++; callbacksMap.set(id, { resolve, reject }); window.parent.postMessage({ type: 'storageGet', id, key, shared }, '*'); }),
+          set: (key, value, shared = false) => new Promise((resolve, reject) => { const id = requestId++; callbacksMap.set(id, { resolve, reject }); window.parent.postMessage({ type: 'storageSet', id, key, value, shared }, '*'); }),
+          delete: (key, shared = false) => new Promise((resolve, reject) => { const id = requestId++; callbacksMap.set(id, { resolve, reject }); window.parent.postMessage({ type: 'storageDelete', id, key, shared }, '*'); }),
+          list: (prefix, shared = false) => new Promise((resolve, reject) => { const id = requestId++; callbacksMap.set(id, { resolve, reject }); window.parent.postMessage({ type: 'storageList', id, prefix, shared }, '*'); })
+        };
+        let pendingBlobs = new Map();
+        URL.createObjectURL = (blob) => { const blobId = `blob-${Date.now()}-${Math.random()}`; pendingBlobs.set(blobId, blob); return `blob-request://${blobId}`; };
+        URL.revokeObjectURL = (url) => { const blobId = url.replace("blob-request://", ""); pendingBlobs.delete(blobId); };
+        const getBlobFromURL = (url) => { const blobId = url.replace("blob-request://", ""); return pendingBlobs.get(blobId); };
+        window.fetch = (url, init = {}) => new Promise((resolve, reject) => {
+          const id = requestId++;
+          const channelId = `fetch-${id}-${Date.now()}`;
+          callbacksMap.set(id, { resolve: (response) => {
+            const stream = new ReadableStream({ start(controller) { streamControllers.set(channelId, controller); }, cancel() { streamControllers.delete(channelId); } });
+            resolve(new Response(stream, { status: response.status, statusText: response.statusText, headers: response.headers }));
+          }, reject, channelId });
+          window.parent.postMessage({ type: 'proxyFetch', id, url, init, channelId }, '*');
+        });
+        window.addEventListener('message', async (event) => {
+          if (event.data.type === 'takeScreenshot') {
+            const rootElement = document.getElementById('artifacts-component-root-html');
+            if (!rootElement) { window.parent.postMessage({ type: 'screenshotError', error: new Error('Root element not found') }, '*'); return; }
+            try { const screenshot = await htmlToImage.toPng(rootElement, { imagePlaceholder: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAA1JREFUGFdjePDgwX8ACOQDoNsk0PMAAAAASUVORK5CYII=" }); window.parent.postMessage({ type: 'screenshotData', data: screenshot }, '*'); } catch (err) { window.parent.postMessage({ type: 'screenshotError', error: err instanceof Error ? err : new Error(String(err)) }, '*'); }
+          } else if (event.data.type === 'claudeComplete') { const cb = callbacksMap.get(event.data.id); if (event.data.error) cb.reject(new Error(event.data.error)); else cb.resolve(event.data.completion); callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'proxyFetchResponse') { const cb = callbacksMap.get(event.data.id); if (event.data.error) { cb.reject(new Error(event.data.error)); callbacksMap.delete(event.data.id); } else { cb.resolve({ status: event.data.status, statusText: event.data.statusText, headers: event.data.headers }); if (!event.data.body) callbacksMap.delete(event.data.id); }
+          } else if (event.data.type === 'proxyFetchStream') { const controller = streamControllers.get(event.data.channelId); if (controller) { if (event.data.error) { controller.error(new Error(event.data.error)); streamControllers.delete(event.data.channelId); } else if (event.data.done) { controller.close(); streamControllers.delete(event.data.channelId); const cb = Array.from(callbacksMap.entries()).find(([_, v]) => v.channelId === event.data.channelId); if (cb) callbacksMap.delete(cb[0]); } else if (event.data.chunk) controller.enqueue(new Uint8Array(event.data.chunk)); }
+          } else if (event.data.type === 'storageGet') { const cb = callbacksMap.get(event.data.id); if (event.data.error) cb.reject(new Error(event.data.error)); else cb.resolve(event.data.result); callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'storageSet') { const cb = callbacksMap.get(event.data.id); if (event.data.error) cb.reject(new Error(event.data.error)); else cb.resolve(event.data.result); callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'storageDelete') { const cb = callbacksMap.get(event.data.id); if (event.data.error) cb.reject(new Error(event.data.error)); else cb.resolve(event.data.result); callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'storageList') { const cb = callbacksMap.get(event.data.id); if (event.data.error) cb.reject(new Error(event.data.error)); else cb.resolve(event.data.result); callbacksMap.delete(event.data.id); }
+        });
+        window.addEventListener('click', (event) => {
+          const isEl = event.target instanceof HTMLElement; if (!isEl) return;
+          const linkEl = event.target.closest("a"); if (!linkEl || !linkEl.href) return;
+          event.preventDefault(); event.stopImmediatePropagation();
+          if (linkEl.href.startsWith("blob-request:")) { const blob = getBlobFromURL(linkEl.href); if (!blob) return; void blob.arrayBuffer().then((data) => { window.parent.postMessage({ type: "downloadFile", filename: linkEl.download, data, mimeType: blob.type || "application/octet-stream" }); });
+          } else if (linkEl.href.startsWith("data:")) { const [header, base64Data] = linkEl.href.split(","); const mimeMatch = header.match(/data:([^;]+)/); const mimeType = mimeMatch ? mimeMatch[1] : "application/octet-stream"; const binaryString = atob(base64Data); const data = Uint8Array.from(binaryString, (c) => c.charCodeAt(0)).buffer; window.parent.postMessage({ type: "downloadFile", filename: linkEl.download, data, mimeType });
+          } else { let linkUrl; try { linkUrl = new URL(linkEl.href); } catch (error) { return; } if (linkUrl.hostname === window.location.hostname) return; window.parent.postMessage({ type: 'openExternal', href: linkEl.href }, '*'); }
+        });
+        const originalOpen = window.open;
+        window.open = function (url) { window.parent.postMessage({ type: "openExternal", href: url }, "*"); };
+        window.addEventListener('error', (event) => { window.parent.postMessage({ type: 'console', message: 'Uncaught Error: ' + event.message }, '*'); });
+      })();
+    </script>
+    <meta charset="UTF-8">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Póker Tracker">
+    <meta name="theme-color" content="#020617">
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" type="image/png" sizes="512x512" href="ptracker-icon.png">
+    <link rel="apple-touch-icon" href="ptracker-icon.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="ptracker-icon.png">
+    <link rel="apple-touch-icon" sizes="152x152" href="ptracker-icon.png">
+    <link rel="apple-touch-icon" sizes="167x167" href="ptracker-icon.png">
+    <title>Póker Tournament Tracker</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link rel="stylesheet" href="style.css">
+</head>
+
+<body id="artifacts-component-root-html">
+  <div class="app">
+    <header>
+      <div class="title-block">
+        <h1><div class="card-icon">♠</div>Póker Tournament Tracker</h1>
+        <p class="subtitle"></p>
+        <div class="tabs">
+          <button class="tab tab-888 active" data-tab="888"><span class="dot"></span>888poker</button>
+          <button class="tab tab-gg" data-tab="gg"><span class="dot"></span>GGPoker</button>
+          <button class="tab tab-summary" data-tab="summary"><span class="dot"></span>Irányítópult</button>
+          <button class="tab tab-charts" data-tab="charts"><span class="dot"></span>📈 Grafikonok</button>
+          <button class="tab tab-new-charts" data-tab="new-charts"><span class="dot"></span>✨ Új grafikonok</button>
+          <button class="tab tab-analysis" data-tab="analysis"><span class="dot"></span>🔍 Elemzés</button>
+          <button class="tab tab-archive" data-tab="archive"><span class="dot"></span>🗂️ Archívum</button>
+        </div>
+      </div>
+    </header>
+
+    <main id="room-layout" class="">
+      <section class="card-section">
+        <div class="card-header">
+          <div>
+            <h2>Verseny rögzítése <span id="room-label" class="room-badge room-888"><span class="room-dot"></span><span id="room-text">888poker</span></span></h2>
+            <small></small>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+            <button class="secondary btn-save-session" type="button" title="Aktuális session archiválása és új session indítása">🗂️ Session mentése</button>
+            <button class="secondary btn-export-json" id="btn-export-json" type="button">💾 Mentés</button>
+            <label for="import-json-input" class="secondary" style="height:26px;cursor:pointer;">📂 Betöltés</label>
+            <input type="file" id="import-json-input" accept="application/json,.json" style="position:absolute;opacity:0;width:1px;height:1px;overflow:hidden;pointer-events:none;">
+          </div>
+        </div>
+
+        <!-- SnG GYORS BEVITEL PANEL -->
+        <div id="sng-quick-panel" class="sng-quick-panel">
+          <div class="sng-panel-header">
+            <span class="sng-panel-title">⚡ SnG Gyors Bevitel</span>
+          </div>
+          <div class="sng-dropdown-row">
+            <div class="sng-field">
+              <label class="sng-label" for="sng-platform">🏠 Platform</label>
+              <select id="sng-platform" class="sng-select">
+                <option value="888poker" selected>888poker</option>
+                <option value="ggpoker">GGPoker</option>
+              </select>
+            </div>
+            <div class="sng-field">
+              <label class="sng-label" for="sng-tournament">🃏 Verseny</label>
+              <select id="sng-tournament" class="sng-select" disabled>
+                <option value="">– Válassz versenyt –</option>
+              </select>
+            </div>
+            <div class="sng-field">
+              <label class="sng-label" for="sng-multiplier">✖️ Szorzó</label>
+              <select id="sng-multiplier" class="sng-select" disabled>
+                <option value="">– Válassz szorzót –</option>
+              </select>
+            </div>
+            <div class="sng-field">
+              <label class="sng-label" for="sng-position">🏁 Helyezés</label>
+              <select id="sng-position" class="sng-select" disabled>
+                <option value="">– Válassz helyezést –</option>
+              </select>
+            </div>
+          </div>
+          <div id="sng-preview" class="sng-preview hidden">
+            <span id="sng-preview-payout" class="sng-preview-item"></span>
+            <span id="sng-preview-profit" class="sng-profit-pos"></span>
+          </div>
+        </div>
+
+        <button class="filter-toggle-btn" id="btn-toggle-manual-form" type="button">
+          <span>📝 Kézi verseny rögzítés (MTT / egyéb)</span>
+          <span class="ftb-arrow" id="manual-form-arrow">▶</span>
+        </button>
+
+        <div id="manual-form-wrapper" class="hidden">
+        <form id="tournament-form">
+          <div class="field" style="grid-column:span 2;">
+            <label for="name">Verseny neve</label>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <input id="name" name="name" type="text" placeholder="Pl. 888 $0.10 Big Fish" style="flex:1;">
+              <select id="quick-preset" style="height:30px;border-radius:8px;border:1px solid rgba(55,65,81,0.9);background:radial-gradient(circle at top left,rgba(15,23,42,0.95),rgba(15,23,42,1));color:#9ca3af;padding:4px 8px;font-size:11px;outline:none;min-width:0;max-width:160px;" title="Gyors kitöltés">
+                <option value="">Gyors kitöltés</option>
+              </select>
+            </div>
+          </div>
+          <div class="field"><label for="buyIn">Belépő (buy-in)</label><input id="buyIn" name="buyIn" type="number" step="0.01" min="0" placeholder="0.00"></div>
+          <div class="field"><label for="rebuys">Rebuy-ok száma</label><input id="rebuys" name="rebuys" type="number" step="1" min="0" value="0"></div>
+          <div class="field"><label for="addon">Add-on (összeg)</label><input id="addon" name="addon" type="number" step="0.01" min="0" value="0"></div>
+          <div class="field"><label for="players">Résztvevők száma</label><input id="players" name="players" type="number" step="1" min="1" placeholder="pl. 250"></div>
+          <div class="field"><label for="position">Helyezésed</label><input id="position" name="position" type="number" step="1" min="1" placeholder="pl. 25"></div>
+          <div class="field"><label for="prize">Nyeremény (0 = nem pénzes)</label><input id="prize" name="prize" type="number" step="0.01" min="0" placeholder="0.00"></div>
+          <div class="field"><label for="gameType">Típus</label><select id="gameType" name="gameType"><option value="MTT">MTT</option><option value="SNG">SNG</option></select></div>
+          <div class="field"><label for="date">Dátum</label><input id="date" name="date" type="date"></div>
+          <div class="field"><label for="notes">Megjegyzés (opcionális)</label><input id="notes" name="notes" type="text" placeholder="Megjegyzések..."></div>
+          <div class="field" style="grid-column:span 2;display:flex;align-items:flex-end;justify-content:flex-end;gap:6px;">
+            <span id="editing-indicator" class="editing-indicator hidden">Szerkesztés módban vagy.</span>
+            <button class="secondary hidden" type="button" id="btn-cancel-edit">Mégse</button>
+            <button class="primary" type="submit" id="submit-btn">+ Verseny hozzáadása</button>
+          </div>
+        </form>
+
+        <div class="hint-row">
+          <small></small>
+          <div id="form-error" class="error-msg"></div>
+        </div>
+        </div>
+
+        <!-- SECTION: VERSENY TÁBLÁZAT -->
+        <div class="table-wrapper">
+          <div class="table-inner">
+            <div class="table-header-row">
+              <div>Név</div><div class="cell-center">Dátum</div><div class="cell-right">Költség</div>
+              <div class="cell-right">Nyeremény</div><div class="cell-right">Profit</div>
+              <div class="cell-center">ITM?</div><div class="cell-center">Típus</div>
+              <div class="cell-center">Mezőny%</div><div class="cell-center">Résztv.</div>
+              <div class="cell-center">Hely.</div><div>Megjegyzés</div><div class="cell-center">Műveletek</div>
+            </div>
+            <div class="table-body" id="table-body"></div>
+          </div>
+        </div>
+
+        <!-- SECTION: SZŰRT EREDMÉNYEK ÖSSZEGZÉSE -->
+        <div class="filter-summary-strip hidden" id="room-filter-summary">
+          <div class="filter-summary-title" id="room-filter-summary-title">Szurt versenyek</div>
+          <div class="filter-summary-stats" id="room-filter-summary-stats"></div>
+        </div>
+
+        <!-- FIX 3: SZŰRŐK toggle + panel (alulra kerültek) -->
+        <button class="filter-toggle-btn" id="btn-toggle-filters" type="button">
+          <span>🔍 Szűrők &amp; Keresés</span>
+          <span id="filter-active-indicator" class="hidden" style="font-size:10px;padding:1px 7px;border-radius:999px;background:rgba(56,189,248,0.18);color:#7dd3fc;border:1px solid rgba(56,189,248,0.5);margin-left:6px;">● Aktív</span>
+          <span class="ftb-arrow" id="filter-toggle-arrow">▶</span>
+        </button>
+
+        <div class="room-filter-panel hidden" id="room-filter-panel">
+          <div class="field">
+            <label for="rf-search">Keresés</label>
+            <input id="rf-search" type="text" placeholder="nev vagy megjegyzes">
+          </div>
+          <div class="field">
+            <label for="rf-cost-mode">Nevezés</label>
+            <select id="rf-cost-mode">
+              <option value="all">Mind</option>
+              <option value="free">Csak freebuy</option>
+              <option value="paid">Csak pénzes</option>
+              <option value="exact">Pont ennyi</option>
+              <option value="gte">Legalább</option>
+              <option value="lte">Legfeljebb</option>
+              <option value="range">Sáv</option>
+            </select>
+          </div>
+          <div class="field"><label for="rf-buyin-exact">Összeg</label><input id="rf-buyin-exact" type="number" min="0" step="0.01" placeholder="0.25"></div>
+          <div class="field"><label for="rf-buyin-min">Min</label><input id="rf-buyin-min" type="number" min="0" step="0.01" placeholder="0"></div>
+          <div class="field"><label for="rf-buyin-max">Max</label><input id="rf-buyin-max" type="number" min="0" step="0.01" placeholder="1.00"></div>
+          <div class="field">
+            <label for="rf-game-type">Típus</label>
+            <select id="rf-game-type">
+              <option value="all">Mind</option>
+              <option value="MTT">MTT</option>
+              <option value="SNG">SNG</option>
+            </select>
+          </div>
+          <div class="room-filter-actions">
+            <div class="filter-preset-row">
+              <button class="filter-preset" type="button" data-filter-preset="free">Freebuy</button>
+              <button class="filter-preset" type="button" data-filter-preset="paid">Pénzes</button>
+              <button class="filter-preset" type="button" data-filter-preset="buyin025">$0.25</button>
+              <button class="filter-preset" type="button" data-filter-preset="buyin1plus">$1+</button>
+              <button class="filter-preset" type="button" data-filter-preset="sng6max025">SNG 6-max $0.25</button>
+            </div>
+            <button class="secondary" id="rf-clear" type="button">Szűrő törlése</button>
+            <!-- FIX 3: MENTETT SZŰRŐK -->
+            <div class="saved-filters-divider">
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                <span style="font-size:11px;color:var(--muted);white-space:nowrap;">💾 Mentett szűrők:</span>
+                <select id="saved-filter-select" style="height:28px;flex:1;min-width:130px;border-radius:8px;border:1px solid rgba(55,65,81,0.9);background:rgba(15,23,42,0.95);color:#e5e7eb;padding:0 8px;font-size:11px;outline:none;">
+                  <option value="">Válassz mentett szűrőt...</option>
+                </select>
+                <button class="danger" id="btn-delete-saved-filter" type="button" title="Kijelölt szűrő törlése" style="height:28px;padding:0 10px;font-size:11px;">✕ Törlés</button>
+              </div>
+              <div style="display:flex;gap:6px;align-items:center;">
+                <input id="save-filter-name" type="text" placeholder="Új szűrő neve (pl. SNG $0.25 3-max)" style="height:28px;flex:1;border-radius:8px;border:1px solid rgba(55,65,81,0.9);background:rgba(15,23,42,0.95);color:#e5e7eb;padding:0 8px;font-size:11px;outline:none;">
+                <button class="secondary" id="btn-save-filter" type="button" style="height:28px;white-space:nowrap;">💾 Mentés</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card-section">
+        <div class="card-header"><div><h2>📊 Aktuális terem statisztika</h2><small></small></div></div>
+        <div class="summary-grid">
+          <div class="summary-card">
+            <div class="summary-card-header"><span>Aktuális terem</span><span id="summary-room-label" class="summary-label">GGPoker</span></div>
+            <div class="summary-card-main">
+              <div>
+                <div class="summary-label">Profit</div>
+                <strong id="room-profit">0.00 $</strong>
+                <div class="summary-label" style="font-size:11px;margin-top:2px;">Freebuy nélkül: <span id="room-profit-nofree">0.00 $</span></div>
+              </div>
+              <div class="summary-mini">
+                <span>Lejátszott versenyek</span><span class="value" id="room-games">0</span>
+                <span>ITM arány</span><span class="value" id="room-itm-rate">0.0%</span>
+              </div>
+            </div>
+            <div class="summary-chip-row">
+              <span class="chip green" id="room-roi-chip">ROI: 0.0%</span>
+              <span class="chip blue" id="room-avg-percentile-chip">Átlagos mezőny%: -</span>
+            </div>
+            <div class="sample-note" id="room-sample-note" aria-live="polite"></div>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px;padding:8px 10px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:10px;">
+              <div style="display:flex;flex-direction:column;">
+                <span class="summary-label" style="font-size:11px;">💰 Jelenlegi egyenleg</span>
+                <strong id="room-balance" style="font-size:18px;color:#22c55e;">49.92 $</strong>
+              </div>
+              <button class="secondary" id="btn-edit-balance" type="button" style="font-size:11px;padding:5px 9px;">Szerk.</button>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-card-header"><span>Költség / nyeremény</span><span class="summary-label">ugyanebben a teremben</span></div>
+            <div class="summary-card-main">
+              <div><div class="summary-label">💸 Befizetve összesen</div><strong id="room-cost">0.00 $</strong></div>
+              <div><div class="summary-label">🏆 Visszakapott összesen</div><strong id="room-prize">0.00 $</strong></div>
+            </div>
+            <div class="summary-mini" style="margin-top:4px;"><span>Pénzbe érés (alkalmak száma)</span><span class="value" id="room-itm-count">0x</span></div>
+          </div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-card-header"><span>🌡️ Profit érzet</span><span class="summary-label">aktuális terem ROI alapján</span></div>
+          <div class="sparkline" id="sparkline-room">
+            <div class="sparkline-track"></div>
+            <div class="sparkline-needle" id="sparkline-room-needle" style="left:calc(50% - 2px);background:rgb(148,163,184);box-shadow:rgba(148,163,184,0.9) 0px 0px 10px;"></div>
+            <div class="sparkline-text" id="sparkline-room-text">Még nincs elég adat</div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <section class="card-section hidden" id="summary-layout">
+      <div class="card-header"><div><h2>📊 Irányítópult</h2><small>Gyors áttekintés az aktív sessionről és a mai játékról.</small></div></div>
+      <div class="period-filter" id="summary-period-filter" style="margin-bottom:10px;">
+        <button class="period-btn active" data-speriod="all">Összes</button>
+        <button class="period-btn" data-speriod="day">Ma</button>
+        <button class="period-btn" data-speriod="week">Hét</button>
+        <button class="period-btn" data-speriod="month">Hónap</button>
+        <button class="period-btn" data-speriod="year">Év</button>
+      </div>
+      <div class="dashboard-glance" aria-label="Mai és aktuális session áttekintése">
+        <div class="glance-card">
+          <span class="glance-label">📅 Ma</span>
+          <strong id="today-profit">0.00 $</strong>
+          <span id="today-meta">0 játék</span>
+        </div>
+        <div class="glance-card">
+          <span class="glance-label">🎯 Aktív session</span>
+          <strong id="session-profit">0.00 $</strong>
+          <span id="session-meta">0 játék</span>
+        </div>
+        <div class="glance-card">
+          <span class="glance-label">💰 Összes bankroll</span>
+          <strong id="total-balance">0.00 $</strong>
+          <span id="total-balance-meta">888 + GG</span>
+        </div>
+        <div class="glance-card">
+          <span class="glance-label">📉 Session drawdown</span>
+          <strong id="session-drawdown">0.00 $</strong>
+          <span id="session-drawdown-meta">Még nincs visszaesés</span>
+        </div>
+      </div>
+      <div class="dashboard-backup">
+        <span id="backup-status">💾 Még nincs kézi biztonsági mentés.</span>
+        <button class="secondary btn-export-json" type="button">💾 Mentés most</button>
+      </div>
+      <div class="summary-grid-3" style="grid-template-columns:1fr;">
+        <div class="summary-card overview-card">
+          <div class="summary-card-header"><span>📊 Összesített profit és költségek</span><span class="summary-label">888 + GG</span></div>
+          <div class="overview-hero">
+            <div class="overview-hero-label">💰 Összprofit</div>
+            <strong class="overview-hero-value" id="all-profit">0.00 $</strong>
+            <div class="summary-label" style="font-size:12px;margin-top:4px;">Freebuy nélkül: <span id="all-profit-nofree">0.00 $</span></div>
+            <div class="overview-hero-chips"><span class="chip gold" id="all-roi-chip">ROI: 0.0%</span><span class="chip blue" id="all-avg-percentile-chip">Átlag mezőny%: -</span></div>
+            <div class="sample-note sample-note-center" id="all-sample-note" aria-live="polite"></div>
+          </div>
+          <div class="overview-stat-grid">
+            <div class="overview-stat"><div class="overview-stat-label">💸 Befizetve</div><div class="overview-stat-value" id="all-cost">0.00 $</div></div>
+            <div class="overview-stat"><div class="overview-stat-label">🏆 Visszakapott</div><div class="overview-stat-value" id="all-prize">0.00 $</div></div>
+            <div class="overview-stat"><div class="overview-stat-label">Versenyek</div><div class="overview-stat-value" id="all-games">0</div></div>
+            <div class="overview-stat"><div class="overview-stat-label">Pénzbe érés</div><div class="overview-stat-value" id="all-itm-count">0x</div></div>
+            <div class="overview-stat"><div class="overview-stat-label">ITM arány</div><div class="overview-stat-value" id="all-itm-rate">0.0%</div></div>
+            <div class="overview-stat"><div class="overview-stat-label">ROI</div><div class="overview-stat-value" id="all-roi-stat">0.0%</div></div>
+          </div>
+        </div>
+      </div>
+      <!-- Per-room overview cards -->
+      <div class="summary-card overview-card" style="margin-top:10px;">
+        <div class="summary-card-header"><span>🎰 888poker profit</span><span class="summary-label">888poker</span></div>
+        <div class="overview-hero">
+          <div class="overview-hero-label">Profit</div>
+          <strong class="overview-hero-value" id="r888-profit">0.00 $</strong>
+          <div class="summary-label" style="font-size:12px;margin-top:4px;">Freebuy nélkül: <span id="r888-profit-nofree">0.00 $</span></div>
+          <div class="overview-hero-chips"><span class="chip gold" id="r888-roi-chip">ROI: 0.0%</span><span class="chip blue" id="r888-avg-chip">Átlag mezőny%: -</span></div>
+        </div>
+        <div class="overview-stat-grid">
+          <div class="overview-stat"><div class="overview-stat-label">💸 Befizetve</div><div class="overview-stat-value" id="r888-cost">0.00 $</div></div>
+          <div class="overview-stat"><div class="overview-stat-label">🏆 Visszakapott</div><div class="overview-stat-value" id="r888-prize">0.00 $</div></div>
+          <div class="overview-stat"><div class="overview-stat-label">Versenyek</div><div class="overview-stat-value" id="r888-games">0</div></div>
+          <div class="overview-stat"><div class="overview-stat-label">Pénzbe érés</div><div class="overview-stat-value" id="r888-itm-count">0x</div></div>
+          <div class="overview-stat"><div class="overview-stat-label">ITM arány</div><div class="overview-stat-value" id="r888-itm-rate">0.0%</div></div>
+          <div class="overview-stat"><div class="overview-stat-label">ROI</div><div class="overview-stat-value" id="r888-roi-stat">0.0%</div></div>
+        </div>
+      </div>
+      <div class="summary-card overview-card" style="margin-top:10px;">
+        <div class="summary-card-header"><span>🃏 GGPoker profit</span><span class="summary-label">GGPoker</span></div>
+        <div class="overview-hero">
+          <div class="overview-hero-label">Profit</div>
+          <strong class="overview-hero-value" id="rgg-profit">0.00 $</strong>
+          <div class="summary-label" style="font-size:12px;margin-top:4px;">Freebuy nélkül: <span id="rgg-profit-nofree">0.00 $</span></div>
+          <div class="overview-hero-chips"><span class="chip gold" id="rgg-roi-chip">ROI: 0.0%</span><span class="chip blue" id="rgg-avg-chip">Átlag mezőny%: -</span></div>
+        </div>
+        <div class="overview-stat-grid">
+          <div class="overview-stat"><div class="overview-stat-label">💸 Befizetve</div><div class="overview-stat-value" id="rgg-cost">0.00 $</div></div>
+          <div class="overview-stat"><div class="overview-stat-label">🏆 Visszakapott</div><div class="overview-stat-value" id="rgg-prize">0.00 $</div></div>
+          <div class="overview-stat"><div class="overview-stat-label">Versenyek</div><div class="overview-stat-value" id="rgg-games">0</div></div>
+          <div class="overview-stat"><div class="overview-stat-label">Pénzbe érés</div><div class="overview-stat-value" id="rgg-itm-count">0x</div></div>
+          <div class="overview-stat"><div class="overview-stat-label">ITM arány</div><div class="overview-stat-value" id="rgg-itm-rate">0.0%</div></div>
+          <div class="overview-stat"><div class="overview-stat-label">ROI</div><div class="overview-stat-value" id="rgg-roi-stat">0.0%</div></div>
+        </div>
+      </div>
+      <!-- ROI Összehasonlító kártya -->
+      <div class="summary-card" style="margin-top:0;">
+        <div class="summary-card-header"><span>🌡️ ROI Összehasonlító</span><span class="summary-label">mindhárom nézet egyszerre</span></div>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-top:6px;">
+          <div>
+            <div class="summary-label" style="font-size:11px;margin-bottom:4px;">🎰 888poker</div>
+            <div class="sparkline" id="sparkline-888">
+              <div class="sparkline-track"></div>
+              <div class="sparkline-needle" id="sparkline-888-needle" style="left:calc(50% - 2px);background:rgb(148,163,184);box-shadow:rgba(148,163,184,0.9) 0px 0px 10px;"></div>
+              <div class="sparkline-text" id="sparkline-888-text">Nincs adat</div>
+            </div>
+          </div>
+          <div>
+            <div class="summary-label" style="font-size:11px;margin-bottom:4px;">🃏 GGPoker</div>
+            <div class="sparkline" id="sparkline-gg">
+              <div class="sparkline-track"></div>
+              <div class="sparkline-needle" id="sparkline-gg-needle" style="left:calc(50% - 2px);background:rgb(148,163,184);box-shadow:rgba(148,163,184,0.9) 0px 0px 10px;"></div>
+              <div class="sparkline-text" id="sparkline-gg-text">Nincs adat</div>
+            </div>
+          </div>
+          <div>
+            <div class="summary-label" style="font-size:11px;margin-bottom:4px;">🌍 Összes</div>
+            <div class="sparkline" id="sparkline-all">
+              <div class="sparkline-track"></div>
+              <div class="sparkline-needle" id="sparkline-all-needle" style="left:calc(50% - 2px);background:rgb(148,163,184);box-shadow:rgba(148,163,184,0.9) 0px 0px 10px;"></div>
+              <div class="sparkline-text" id="sparkline-all-text">Nincs adat</div>
+            </div>
+          </div>
+        </div>
+        <div id="sparkline-detail-text" class="summary-note" style="margin-top:6px;"></div>
+      </div>
+
+    </section>
+
+    <section class="card-section" id="charts-layout" style="display:none;">
+      <div class="card-header"><div><h2>Profit grafikonok</h2></div></div>
+      <!-- Chart mode toggle -->
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+        <div class="period-filter" id="chart-mode-filter">
+          <button class="period-btn active" data-chartmode="cumulative">Kumulált profit</button>
+          <button class="period-btn" data-chartmode="ma">Mozgóátlag</button>
+        </div>
+        <div id="ma-controls" style="display:none;align-items:center;gap:6px;">
+          <span style="font-size:12px;color:#94a3b8;">Ablak:</span>
+          <div class="period-filter" id="ma-period-filter">
+            <button class="period-btn" data-ma="5">5</button>
+            <button class="period-btn active" data-ma="10">10</button>
+            <button class="period-btn" data-ma="20">20</button>
+            <button class="period-btn" data-ma="50">50</button>
+          </div>
+        </div>
+      </div>
+      <div class="period-filter" id="chart-time-filter">
+        <button class="period-btn active" data-period="all">Összes</button>
+        <button class="period-btn" data-period="month">Hónap</button>
+        <button class="period-btn" data-period="week">Hét</button>
+        <button class="period-btn" data-period="day">Ma</button>
+      </div>
+      <div class="chart-block"><div class="chart-title">888poker</div><div id="chart-888" class="chart-svg-wrap"></div></div>
+      <div class="chart-block"><div class="chart-title">GGPoker</div><div id="chart-gg" class="chart-svg-wrap"></div></div>
+      <div class="chart-block"><div class="chart-title">Összes terem</div><div id="chart-all" class="chart-svg-wrap"></div></div>
+    </section>
+
+    <section class="card-section" id="new-charts-layout" style="display:none;">
+      <div class="card-header"><div><h2>✨ Új grafikonok</h2><small>Időszakonkénti (napi/heti/havi) profit teremenként.</small></div></div>
+      <div class="period-filter">
+        <button class="period-btn" data-nperiod="day">Nap</button>
+        <button class="period-btn active" data-nperiod="week">Hét</button>
+        <button class="period-btn" data-nperiod="month">Hónap</button>
+      </div>
+      <div class="chart-block"><div class="chart-title">888poker – időszaki profit</div><div id="nchart-888" class="chart-svg-wrap"></div></div>
+      <div class="chart-block"><div class="chart-title">GGPoker – időszaki profit</div><div id="nchart-gg" class="chart-svg-wrap"></div></div>
+      <div class="chart-block"><div class="chart-title">Összes terem – időszaki profit</div><div id="nchart-all" class="chart-svg-wrap"></div></div>
+      <div class="card-header" style="margin-top:14px;"><div><h2>🎯 Egyéni grafikon</h2><small>Állítsd be a metrikát, csoportosítást, termet és időszakot.</small></div></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:10px;">
+        <div class="field"><label>Metrika</label>
+          <select id="cc-metric">
+            <option value="profit">Profit</option><option value="cumprofit">Kumulált profit</option>
+            <option value="roi">ROI %</option><option value="itm">ITM %</option>
+            <option value="games">Versenyek száma</option><option value="cost">Befizetés</option>
+            <option value="prize">Visszakapott</option>
+          </select>
+        </div>
+        <div class="field"><label>Csoportosítás</label>
+          <select id="cc-group"><option value="day">Nap</option><option value="week" selected>Hét</option><option value="month">Hónap</option><option value="year">Év</option></select>
+        </div>
+        <div class="field"><label>Terem</label>
+          <select id="cc-room"><option value="all">Összes</option><option value="888">888poker</option><option value="gg">GGPoker</option></select>
+        </div>
+        <div class="field"><label>Típus</label>
+          <select id="cc-type"><option value="line">Vonal</option><option value="bar" selected>Oszlop</option></select>
+        </div>
+        <div class="field"><label>Kezdő dátum</label><input type="date" id="cc-from"></div>
+        <div class="field"><label>Befejező dátum</label><input type="date" id="cc-to"></div>
+      </div>
+      <div class="chart-block"><div class="chart-title" id="cc-title">Egyéni</div><div id="cc-chart" class="chart-svg-wrap"></div></div>
+    </section>
+
+    <section class="card-section" id="analysis-layout" style="display:none;">
+      <div class="card-header"><div><h2>🔍 Elemzés</h2><small>Ritkábban nézett részletes statisztikák.</small></div></div>
+
+      <!-- Szorzó statisztika -->
+      <div class="summary-card" style="margin-bottom:12px;">
+        <div class="summary-card-header"><span>🎲 Szorzó statisztika</span><span class="summary-label">csak szorzóval rögzített játékok</span></div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center;">
+          <div class="period-filter" id="mult-room-filter">
+            <button class="period-btn active" data-multroom="all">Összes</button>
+            <button class="period-btn" data-multroom="888">888poker</button>
+            <button class="period-btn" data-multroom="gg">GGPoker</button>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="stats-table" id="multiplier-stats-table"><tbody>
+            <tr><th>Szorzó</th><th>Db</th><th>Arány</th><th>1. hely</th><th>ITM%</th><th>Profit</th><th>ROI</th></tr>
+          </tbody></table>
+        </div>
+        <div class="summary-note" style="margin-top:8px;">⚠️ A szorzó csak az új gyors bevitellel rögzített játékokon érhető el. A korábbi manuálisan bevitt játékok nem szerepelnek itt.</div>
+      </div>
+
+      <!-- Versenytípusok az elemzésben -->
+      <div class="summary-card">
+        <div class="summary-card-header"><span>🏷️ Versenytípusok</span><span class="summary-label">összes verseny típusonként</span></div>
+        <div class="table-scroll">
+          <table class="stats-table" id="analysis-tourney-type-table"><tbody>
+            <tr><th>Típus</th><th>Db</th><th>Profit</th><th>ROI</th><th>ITM%</th></tr>
+          </tbody></table>
+        </div>
+      </div>
+      <div class="summary-card analysis-card">
+        <div class="summary-card-header"><span>🎯 Formátum és nevezés</span><span class="summary-label">terem · típus · buy-in · mezőny</span></div>
+        <div class="table-scroll">
+          <table class="stats-table" id="analysis-stakes-table"><tbody>
+            <tr><th>Formátum</th><th>Db</th><th>Profit</th><th>ROI</th><th>ITM%</th></tr>
+          </tbody></table>
+        </div>
+      </div>
+      <div class="summary-card analysis-card">
+        <div class="summary-card-header"><span>⏱️ Utóbbi játékok formája</span><span class="summary-label">legfrissebb játékok alapján</span></div>
+        <div class="table-scroll">
+          <table class="stats-table" id="recent-form-table"><tbody>
+            <tr><th>Minta</th><th>Db</th><th>Profit</th><th>ROI</th><th>ITM%</th></tr>
+          </tbody></table>
+        </div>
+      </div>
+    </section>
+    <section class="card-section" id="archive-layout" style="display:none;">
+      <div class="card-header">
+        <div><h2>🗂️ Arhiválás és mentés</h2><small>Az aktuális session archiválása, majd új session indítása új kezdő egyenlegekkel.</small></div>
+        <button class="primary btn-save-session" type="button">🗂️ Session mentése</button>
+      </div>
+      <div class="summary-note" id="archive-total-note" style="margin:0 0 10px;"></div>
+      <div id="archive-list" class="archive-list"></div>
+    </section>
+  </div>
+
+  <div class="note-viewer-backdrop" id="note-viewer-backdrop">
+    <div class="note-viewer" role="dialog" aria-modal="true">
+      <div class="note-viewer-header">
+        <div class="note-viewer-title">Megjegyzés részletesen</div>
+        <button class="note-viewer-close" type="button" id="note-viewer-close-top">Bezárás</button>
+      </div>
+      <div class="note-viewer-body" id="note-viewer-body"></div>
+      <div class="note-viewer-footer"><button class="note-viewer-close" type="button" id="note-viewer-close-bottom">Bezárás</button></div>
+    </div>
+  </div>
+
+  <div class="session-modal-backdrop" id="session-modal-backdrop">
+    <div class="session-modal" role="dialog" aria-modal="true" aria-labelledby="session-modal-title">
+      <div class="note-viewer-header">
+        <div class="session-modal-title" id="session-modal-title">🗂️ Session mentése</div>
+        <button class="note-viewer-close" type="button" id="session-modal-close">Bezárás</button>
+      </div>
+      <div class="session-modal-summary" id="session-modal-summary"></div>
+      <div class="field">
+        <label for="session-name">Session neve / megjegyzés (opcionális)</label>
+        <input id="session-name" type="text" placeholder="Pl. November eleje" autocomplete="off">
+      </div>
+      <div class="session-modal-section">Új session kezdő egyenlege</div>
+      <div class="session-modal-fields">
+        <div class="field">
+          <label for="session-new-gg">🃏 GGPoker ($)</label>
+          <input id="session-new-gg" type="text" inputmode="decimal" placeholder="0.00" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="session-new-888">🎰 888poker ($)</label>
+          <input id="session-new-888" type="text" inputmode="decimal" placeholder="0.00" autocomplete="off">
+        </div>
+      </div>
+      <div class="summary-note">A mentés után az aktív versenylista kiürül, az eddigi session pedig az Archívum fülön megtekinthető marad.</div>
+      <div id="session-modal-error" class="error-msg"></div>
+      <div class="session-modal-actions">
+        <button class="secondary" type="button" id="session-modal-cancel">Mégse</button>
+        <button class="primary" type="button" id="session-modal-confirm">Mentés és új session indítása</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="sng-toast" class="sng-toast hidden" role="status" aria-live="polite">
+    <span id="sng-toast-text">✅ Rögzítve!</span>
+    <button type="button" id="sng-undo-btn" class="sng-undo-btn hidden">Visszavonás</button>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
